@@ -310,18 +310,17 @@ static float Spoke_Turn(uint8_t from,uint8_t to){
 #define NAV_CENTER_CM		95.0f	//方框几何中心 <-> 中心交点(发挥2离线用)
 #define NAV_BOX_IN_CM		15.0f	//方框黑边框 -> 方框几何中心(A4 短边/2≈14.85)
 
-#define NAV_BACKFORTH_LAPS	3		//折返跑这么多趟就自己停(也可随时按键中止)
+#define NAV_BACKFORTH_LAPS	3		//折返跑这么多趟就自己停(中途想停就把车抬起来 2~3s)
 
 enum Nav_Result{
 	Nav_OK=0,			//正常开到目标方框
 	Nav_ErrLost=1,		//Car_TraceLine 没返回 Trace_AllOn(脱线了)
 	Nav_ErrNoLine=2,	//爬行超距还没压到引导线
-	Nav_ErrMPU=3,		//陀螺失联
-	Nav_Abort=4			//用户按键中止
+	Nav_ErrMPU=3		//陀螺失联
 };
 
-static char *Nav_Msg[5]={
-	"OK","ERR LOST LINE","ERR NO LINE","ERR MPU LOST","ABORTED"
+static char *Nav_Msg[4]={
+	"OK","ERR LOST LINE","ERR NO LINE","ERR MPU LOST"
 };
 
 /* ---------------- 状态量 ---------------- */
@@ -332,8 +331,6 @@ volatile uint8_t  Run_Current=0;
 volatile uint16_t Run_Laps=0;
 volatile uint16_t Run_Ticks=0;
 
-static uint8_t Nav_AllowAbort=0;	//只有折返模式中途允许按键中止(它要跑 30s)
-
 void Dest_Main_Next(void){
 	Dest_Main++;
 	if (Dest_Main>DEST_MAX) Dest_Main=1;
@@ -341,14 +338,6 @@ void Dest_Main_Next(void){
 void Dest_Alt_Next(void){
 	Dest_Alt++;
 	if (Dest_Alt>DEST_MAX) Dest_Alt=1;
-}
-
-/* 直接读按键引脚,不能用 Keyx_GetStatus():那个会阻塞等松手,会把控制环卡死 */
-static uint8_t Nav_KeyDown(void){
-	if (!Nav_AllowAbort) return 0;
-	if (GPIO_ReadInputDataBit(GPIOB,GPIO_Pin_0)==Bit_SET) return 1;
-	if (GPIO_ReadInputDataBit(GPIOB,GPIO_Pin_1)==Bit_SET) return 1;
-	return 0;
 }
 
 /* ---------------- OLED 小工具(Line 1~4,Column 1~16) ---------------- */
@@ -360,16 +349,16 @@ static void Nav_ShowRun(char *Tag,uint8_t Dest){
 	OLED_ShowNum(2,7,Dest,1);
 	OLED_ShowString(3,1,"Laps: ");
 	OLED_ShowNum(3,7,Run_Laps,3);
-	OLED_ShowString(4,1,"K1/K2: STOP");
+	OLED_ShowString(4,1,"LIFT: STOP");
 }
 
 static void Nav_ShowResult(uint8_t r){
 	OLED_Clear();
 	OLED_ShowString(1,1,"FINISHED");
-	OLED_ShowString(2,1,Nav_Msg[r<5?r:0]);
+	OLED_ShowString(2,1,Nav_Msg[r<4?r:0]);
 	OLED_ShowString(3,1,"Laps: ");
 	OLED_ShowNum(3,7,Run_Laps,3);
-	OLED_ShowString(4,1,"ESC: K1/K2");
+	OLED_ShowString(4,1,"LIFT: STOP");
 }
 
 /* ---------------- 爬行:低速直行,直到传感器重新看到 1~3 路压线 ----------------
@@ -393,8 +382,6 @@ static uint8_t Nav_CreepOut(void){
 		if (Timer_GetMicros()<NAV_PERIOD_US) continue;
 		Timer_Switch(turn_on);
 		Run_Ticks++;
-
-		if (Nav_KeyDown()){ Motor_SetSpeed(0,0); return Nav_Abort; }
 
 		Data=MPU_6050_GetTurnNeedData();
 		if (Data.IsNew==New){ MPU_6050_YawAngle_Update(&Data); mpu_lost=0; }
@@ -465,7 +452,7 @@ static uint8_t Nav_ParkAt(uint8_t from,uint8_t to){
 void Mode_BackForth(void){
 	uint8_t r=Nav_OK,from=DEST_START,to=3,t;
 
-	Run_Laps=0; Run_Ticks=0; Run_State=1; Nav_AllowAbort=1;
+	Run_Laps=0; Run_Ticks=0; Run_State=1;
 	Motor_Switch(turn_on);
 
 	while (1){
@@ -483,7 +470,7 @@ void Mode_BackForth(void){
 	}
 
 	Motor_SetSpeed(0,0);
-	Nav_AllowAbort=0; Run_State=0;
+	Run_State=0;
 	Nav_ShowResult(r);
 }
 
@@ -492,7 +479,7 @@ void Mode_GoDestination(void){
 	uint8_t r,d=Dest_Main;
 
 	if (d<1||d>DEST_MAX) d=3;
-	Run_Laps=0; Run_Ticks=0; Run_State=1; Nav_AllowAbort=1;
+	Run_Laps=0; Run_Ticks=0; Run_State=1;
 	Motor_Switch(turn_on);
 
 	Run_Current=d;
@@ -508,7 +495,7 @@ void Mode_GoDestination(void){
 	}
 
 	Motor_SetSpeed(0,0);
-	Nav_AllowAbort=0; Run_State=0;
+	Run_State=0;
 	Nav_ShowResult(r);
 }
 
@@ -521,7 +508,7 @@ void Mode_A2B(void){
 	if (b<1||b>DEST_MAX) b=4;
 	if (b==a) b=(a==DEST_MAX)?4:(uint8_t)(a+1);	//A、B 不能是同一个
 
-	Run_Laps=0; Run_Ticks=0; Run_State=1; Nav_AllowAbort=1;
+	Run_Laps=0; Run_Ticks=0; Run_State=1;
 	Motor_Switch(turn_on);
 
 	Run_Current=a;
@@ -547,7 +534,7 @@ void Mode_A2B(void){
 	}
 
 	Motor_SetSpeed(0,0);
-	Nav_AllowAbort=0; Run_State=0;
+	Run_State=0;
 	Nav_ShowResult(r);
 }
 
@@ -560,7 +547,7 @@ void Mode_OffLine(void){
 	float turn;
 
 	if (s<2||s>4) s=3;
-	Run_Laps=0; Run_Ticks=0; Run_State=1; Nav_AllowAbort=1;
+	Run_Laps=0; Run_Ticks=0; Run_State=1;
 	Motor_Switch(turn_on);
 
 	Run_Current=1;
@@ -585,6 +572,6 @@ void Mode_OffLine(void){
 	}
 
 	Motor_SetSpeed(0,0);
-	Nav_AllowAbort=0; Run_State=0;
+	Run_State=0;
 	Nav_ShowResult(r);
 }

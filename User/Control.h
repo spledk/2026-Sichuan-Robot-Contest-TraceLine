@@ -22,7 +22,7 @@ void Devices_Init(void);
 void Interact(void);
 void Car_TurnTo(float target_degree);
 uint8_t Car_TraceLine(void);
-void Car_MoveForward(int16_t distance_cm);
+void Car_MoveForward(float distance_cm);	//正=前进 负=倒车,单位 cm
 
 /* ---------------- 模式函数(Interact 里按 Key2 调用) ---------------- */
 void Mode_BackForth(void);		//基本(1):0号 <-> 3号 折返

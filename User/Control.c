@@ -181,19 +181,23 @@ uint8_t Car_TraceLine(void){
 #define MOVE_PERIOD_US	10000	//控制周期 10ms
 #define MOVE_BASE_PWM	350		
 #define MOVE_SLOW_PWM	200		//提前减速
-#define MOVE_SLOW_RATIO	0.1f	//剩余里程少于总距离的10%就开始减速
+#define MOVE_SLOW_ZONE_CM	10.0f	//还剩这么多 cm 就切到 MOVE_SLOW_PWM(为了停准)
 #define MOVE_KP			8.0f	
 #define MOVE_KD			3.0f	
 #define MOVE_STEER_MAX	250		
 #define MOVE_YAW_LIMIT	30.0f	//意外事件导致偏转较大直接放弃
 #define MOVE_MPU_MAX	100		//陀螺失联
 
-void Car_MoveForward(int16_t distance_cm){
-	float slow_zone=(float)distance_cm*MOVE_SLOW_RATIO;	
+void Car_MoveForward(float distance_cm){
+	float mag=MyABS(distance_cm);				//要走多少 cm(不看符号)
+	float remain=0.0f;
 	struct MPU_6050_TurnNeedData Data;
 	float yaw=0.0f,u=0.0f,mileage=0.0f;
 	uint16_t mpu_lost=0;
-	int16_t steer=0,base=MOVE_BASE_PWM;
+	int16_t steer=0,base=0;
+	int8_t dir=(distance_cm<0.0f)? -1:1;		//正=前进 负=倒车
+
+	if (mag<0.5f) return;
 
 	Motor_SetSpeed(0,0);
 	Motor_MileageCountSwitch(turn_on);		
@@ -215,18 +219,25 @@ void Car_MoveForward(int16_t distance_cm){
 
 		yaw=MPU_6050_GetYaw();
 
+		/* Motor_GetMileage() 倒车时给的是负数,统一换算成"已经走了多少" */
 		mileage=Motor_GetMileage();
-		if (mileage>=(float)distance_cm) break;
+		if (dir<0) mileage=-mileage;
+
+		remain=mag-mileage;
+		if (remain<=0.0f) break;						//走够了
 		if (yaw>MOVE_YAW_LIMIT||yaw<-MOVE_YAW_LIMIT) break;
 
-		base=((float)distance_cm-mileage<slow_zone)? MOVE_SLOW_PWM:MOVE_BASE_PWM;
+		base=(remain<MOVE_SLOW_ZONE_CM)? MOVE_SLOW_PWM:MOVE_BASE_PWM;
+		base=base*dir;
 
 		u=MOVE_KP*(0.0f-yaw)-MOVE_KD*((float)Data.GyroZ/MPU_6050_GYRO_SENS);
 		if (u>MOVE_STEER_MAX) u=MOVE_STEER_MAX;
 		if (u<-MOVE_STEER_MAX) u=-MOVE_STEER_MAX;
 		steer=(int16_t)u;
 
-		Motor_SetSpeed(base+steer,base-steer);
+		/* 倒车时左右轮的修正量必须反号:同样的左右轮速差,倒着走产生的
+		   偏航方向和正着走是相反的,不反号会越修越偏。 */
+		Motor_SetSpeed(base+dir*steer,base-dir*steer);
 	}
 	Motor_SetSpeed(0,0);
 }
@@ -251,10 +262,11 @@ void Car_MoveForward(int16_t distance_cm){
  *  一次"从 from 号走到 to 号"的固定流程(全程朝前开,不倒车):
  *    1) 从方框里的白纸爬出来,压到引导线          Nav_CreepOut()
  *    2) Car_TraceLine() 循迹到中心交点            -> Trace_AllOn
- *    3) Car_TurnTo(辐条夹角) 转到 to 那条辐条
- *    4) 爬出交点黑块,压到 to 那条线               Nav_CreepOut()
- *    5) Car_TraceLine() 循迹到 to 号方框的黑边框   -> Trace_AllOn
- *    6) Car_MoveForward(15) 进方框到几何中心
+ *    3) Car_MoveForward(NAV_SENSOR_CENTER_CM) 把测试点挪到交点上
+ *    4) Car_TurnTo(辐条夹角) 转到 to 那条辐条
+ *    5) 爬出交点黑块,压到 to 那条线               Nav_CreepOut()
+ *    6) Car_TraceLine() 循迹到 to 号方框的黑边框   -> Trace_AllOn
+ *    7) Car_MoveForward(NAV_PARK_CM) 进方框到几何中心(末段自动减速)
  *
  *  这里没有"数第几次退出"的状态机,因为 Car_TraceLine 的两次退出
  *  天然就被两个 Nav_CreepOut() 隔开了,顺序是定死的。
@@ -307,8 +319,30 @@ static float Spoke_Turn(uint8_t from,uint8_t to){
 #define NAV_MPU_MAX			100		//连续 1s 没有新陀螺样本 = 异常
 #define NAV_TURN_SKIP		1.0f	//辐条夹角小于它就不转向(0号<->3号时是 0)
 
-#define NAV_CENTER_CM		95.0f	//方框几何中心 <-> 中心交点(发挥2离线用)
-#define NAV_BOX_IN_CM		15.0f	//方框黑边框 -> 方框几何中心(A4 短边/2≈14.85)
+/* ---------------- 停车标定(上车实测这下面两项,停车精度全靠它) ----------------
+   ① NAV_SENSOR_CENTER_CM : 传感器排 -> 小车"唯一测试点"(你指定的那个中心点)
+      的距离,单位 cm。拿尺子量传感器板前沿到测试点的投影距离。
+   ② NAV_BOX_LEN_CM : 停车区方框里"顺着进车方向"的那条边长,单位 cm。
+      A4 纸是 21 x 29.7;六个方框进车方向都是走长边,量出来应该是 29.7。
+   派生量:
+      NAV_SPOKE_CM  = 方框黑边框 <-> 中心交点 = 引导线长度 = 80
+      NAV_PARK_CM   = 传感器压到方框边框后还要往前开多少,测试点才落到方框
+                      几何中心 = ① + ②/2
+      NAV_CENTER_CM = 方框几何中心 <-> 中心交点 = ③ + ②/2
+   注意 Car_TraceLine 停的时候,压住黑块的是"传感器排",而测试点在它后面
+   ①那么远,所以每次都要再往前补一段,否则转向是绕传感器转的,会横着偏。 */
+#define NAV_SENSOR_CENTER_CM	8.0f	//← 待实测:测试点(中心)到传感器排
+#define NAV_BOX_LEN_CM			29.7f	//← 待实测:方框顺进车方向的边长
+#define NAV_SPOKE_CM			80.0f	//引导线长度(实测)
+#define NAV_PARK_CM				(NAV_SENSOR_CENTER_CM+NAV_BOX_LEN_CM*0.5f)
+#define NAV_CENTER_CM			(NAV_SPOKE_CM+NAV_BOX_LEN_CM*0.5f)
+
+/* ---------------- 折返返程的两种走法 ----------------
+   0 = 到 3号方框中心后原地转 180°,再循迹走回来(稳,但每趟多两次转向)
+   1 = 不转向,直接用定距直行倒车 2*NAV_CENTER_CM 回 0号方框中心。
+       快得多,但返程全靠陀螺+编码器推算,横着偏了没东西纠正,一旦偏出
+       2.5cm 线宽就直接判失败。先用 0 跑通,有把握了再切 1。 */
+#define NAV_BACKFORTH_REVERSE	0
 
 #define NAV_BACKFORTH_LAPS	3		//折返跑这么多趟就自己停(中途想停就把车抬起来 2~3s)
 
@@ -426,22 +460,29 @@ static uint8_t Nav_ParkAt(uint8_t from,uint8_t to){
 	r=Car_TraceLine();
 	if (r!=Trace_AllOn) return Nav_ErrLost;
 
-	/* 3) 在交点上转到 to 号那条辐条(0号<->3号时夹角是 0,不用转) */
+	/* 3) 再往前 NAV_SENSOR_CENTER_CM,把小车的测试点挪到交点上。
+	      Car_TraceLine 停的时候压住交点的是"传感器排",测试点还在它后面
+	      ①那么远。先把这一段补上,下一步原地转向才是绕交点转的,转完车头
+	      正好落在目标辐条上;不补的话每转一个角度就会横着偏出去
+	      NAV_SENSOR_CENTER_CM*sin(转角),转90度能偏出十几厘米。 */
+	Car_MoveForward(NAV_SENSOR_CENTER_CM);
+
+	/* 4) 在交点上转到 to 号那条辐条(0号<->3号时夹角是 0,不用转) */
 	turn=Spoke_Turn(from,to)*NAV_LEFT_SIGN;
 	if (turn>NAV_TURN_SKIP||turn<-NAV_TURN_SKIP){
 		Car_TurnTo(turn);
 	}
 
-	/* 4) 爬出交点黑块,压到 to 号那条线 */
+	/* 5) 爬出交点黑块,压到 to 号那条线 */
 	r=Nav_CreepOut();
 	if (r!=Nav_OK) return r;
 
-	/* 5) 循迹到 to 号方框的黑边框 */
+	/* 6) 循迹到 to 号方框的黑边框 */
 	r=Car_TraceLine();
 	if (r!=Trace_AllOn) return Nav_ErrLost;
 
-	/* 6) 再往前 15cm,测试点落到方框几何中心 */
-	Car_MoveForward((int16_t)NAV_BOX_IN_CM);
+	/* 7) 再往前 NAV_PARK_CM,测试点落到方框几何中心(最后 10cm 自动减速) */
+	Car_MoveForward(NAV_PARK_CM);
 	return Nav_OK;
 }
 
@@ -450,23 +491,37 @@ static uint8_t Nav_ParkAt(uint8_t from,uint8_t to){
 /* 基本(1) 折返:0号 <-> 3号,30s 内折返次数越多越好
    0号<->3号 是一条笔直的 160cm 线,所以交点上不转向,只是路过。 */
 void Mode_BackForth(void){
-	uint8_t r=Nav_OK,from=DEST_START,to=3,t;
+	uint8_t r=Nav_OK;
 
 	Run_Laps=0; Run_Ticks=0; Run_State=1;
 	Motor_Switch(turn_on);
 
 	while (1){
-		Run_Current=to;
-		Nav_ShowRun("GO",to);
+		Run_Current=3;
+		Nav_ShowRun("GO",3);
 
-		r=Nav_ParkAt(from,to);					//一站
+		r=Nav_ParkAt(DEST_START,3);				//0号 -> 3号
 		if (r!=Nav_OK) break;
 
-		if (to==DEST_START) Run_Laps++;			//回到停车启动区 = 完成一次折返
-		if (Run_Laps>=NAV_BACKFORTH_LAPS) break;
+#if NAV_BACKFORTH_REVERSE
+		/* 方案2:不转向,直接倒车回 0号方框中心。
+		   车头一直朝 3号,所以下一趟直接再往前开一次就行,不用再掉头。 */
+		Run_Current=DEST_START;
+		Nav_ShowRun("REV",DEST_START);
+		Car_MoveForward(-2.0f*NAV_CENTER_CM);
+#else
+		/* 方案1:原地掉头,再循迹走回 0号 */
+		Car_TurnTo(180.0f);
+		Run_Current=DEST_START;
+		Nav_ShowRun("BACK",DEST_START);
+		r=Nav_ParkAt(3,DEST_START);				//3号 -> 0号
+		if (r!=Nav_OK) break;
 
-		Car_TurnTo(180.0f);						//到站后原地掉头,下一趟往回开
-		t=from; from=to; to=t;
+		Car_TurnTo(180.0f);						//再掉头,准备下一趟
+#endif
+
+		Run_Laps++;								//回到停车启动区 = 完成一次折返
+		if (Run_Laps>=NAV_BACKFORTH_LAPS) break;
 	}
 
 	Motor_SetSpeed(0,0);
@@ -561,14 +616,14 @@ void Mode_OffLine(void){
 		Run_Current=s;
 		Nav_ShowRun("OFFLINE",s);
 
-		Car_MoveForward((int16_t)NAV_CENTER_CM);	//直线开到中心交点
+		Car_MoveForward(NAV_CENTER_CM);	//直线开到中心交点
 
 		turn=Spoke_Turn(1,s)*NAV_LEFT_SIGN;		//在交点上转到停车点那条辐条
 		if (turn>NAV_TURN_SKIP||turn<-NAV_TURN_SKIP){
 			Car_TurnTo(turn);
 		}
 
-		Car_MoveForward((int16_t)NAV_CENTER_CM);	//直线开到停车点方框几何中心
+		Car_MoveForward(NAV_CENTER_CM);	//直线开到停车点方框几何中心
 	}
 
 	Motor_SetSpeed(0,0);

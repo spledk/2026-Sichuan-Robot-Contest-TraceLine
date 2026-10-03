@@ -1,0 +1,24 @@
+﻿# ---- Keil MDK 构建产物(不入库) ----
+Objects/
+Listings/
+DebugConfig/
+*.uvguix.*
+*.build_log.htm
+*.bak
+*.dep
+*.crf
+*.o
+*.d
+*.axf
+*.lnp
+*.iex
+*.sct
+*.scvd
+JLinkLog.txt
+JLinkSettings.ini
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

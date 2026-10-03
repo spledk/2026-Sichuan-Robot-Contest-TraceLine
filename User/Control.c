@@ -8,6 +8,7 @@
 #include "Interface.h"
 #include "Delay.h"
 #include "Timer.h"
+#include <math.h>
 
 void Devices_Init(void){
 	Timer_Init();
@@ -347,6 +348,37 @@ static float Spoke_Turn(uint8_t from,uint8_t to){
 #define NAV_PARK_CM				(NAV_SENSOR_CENTER_CM+NAV_BOX_LEN_CM*0.5f)
 #define NAV_CENTER_CM			(NAV_SPOKE_CM+NAV_BOX_LEN_CM*0.5f)
 
+/* ---------------- 离线直行的几何(发挥2 用) ----------------
+   六个方框的几何中心,都在以中心交点为圆心、半径 NAV_CENTER_CM 的圆上,
+   方位角就是上面那张 Spoke_Angle 表(0° = 车停在0号时车头方向朝上,左转为正)。
+   单位方向向量 dir(θ) = (-sinθ, cosθ):
+        θ=  0 -> ( 0.0000, 1.0000) 朝上(3号)
+        θ= 45 -> (-0.7071, 0.7071) 左上(2号)
+        θ= 90 -> (-1.0000, 0.0000) 朝左(1号)
+        θ=180 -> ( 0.0000,-1.0000) 朝下(0号)
+        θ=-45 -> ( 0.7071, 0.7071) 右上(4号)
+        θ=-90 -> ( 1.0000, 0.0000) 朝右(5号)
+   六个角度全是 45° 的整数倍,直接查表,不用 sin/cos。 */
+static const float Spoke_DirX[6]={ 0.0f,-1.0f,-0.707107f, 0.0f, 0.707107f, 1.0f};
+static const float Spoke_DirY[6]={-1.0f, 0.0f, 0.707107f, 1.0f, 0.707107f, 0.0f};
+
+/* from 号方框几何中心 -> to 号方框几何中心 这条直线的长度(cm) */
+static float Nav_DirectDist(uint8_t from,uint8_t to){
+	float dx=NAV_CENTER_CM*(Spoke_DirX[to]-Spoke_DirX[from]);
+	float dy=NAV_CENTER_CM*(Spoke_DirY[to]-Spoke_DirY[from]);
+	return sqrtf(dx*dx+dy*dy);
+}
+
+/* 这条直线的绝对航向(度,和 yaw 同一套符号:左转为正)。
+   两点都在同一个圆上,弦的方向 = 两端方位角的平均 ± 90°,取 +90 还是 -90
+   看 to 在 from 的哪一侧(θ_to > θ_from 就 +90)。结果全是 22.5° 的整数倍,
+   比拖进 atan2 干净:1->2 = -22.5°,1->3 = -45°,1->4 = -67.5°。 */
+static float Nav_DirectHeading(uint8_t from,uint8_t to){
+	float m=(Spoke_Angle[from]+Spoke_Angle[to])*0.5f;
+	if (Spoke_Angle[to]>Spoke_Angle[from]) return m+90.0f;
+	return m-90.0f;
+}
+
 /* ---------------- 折返返程的两种走法 ----------------
    0 = 到 3号方框中心后原地转 180°,再循迹走回来(稳,但每趟多两次转向)
    1 = 不转向,直接用定距直行倒车 2*NAV_CENTER_CM 回 0号方框中心。
@@ -575,38 +607,48 @@ void Mode_A2B(void){
 	Interface_Finish(Nav_Msg[r<4?r:0]);
 }
 
-/* 发挥(2) 巡线到 1号,之后不经巡线直线开到停车点 Dest_Alt
+/* 发挥(2) 巡线到 1号,之后不经巡线、一条直线直接开到停车点 Dest_Alt。
    题目规定停车点不能是 1、5 号,所以选择页只在 2~4 里循环。
-   离线段走"方框中心 -> 中心交点 -> 停车点方框中心"两段各 NAV_CENTER_CM,
-   全程只用陀螺航向 + 编码器里程,不碰传感器。 */
+   离线段 = "1号方框几何中心 -> 停车点方框几何中心" 的那条弦,不经过中心交点:
+   两点都在半径 NAV_CENTER_CM 的圆上,距离和航向用上面的几何直接算。 */
 void Mode_OffLine(void){
 	uint8_t r,s=Dest_Alt;
-	float turn;
+	float dist,turn;
 
-	if (s<2||s>4) s=3;
+	if (s<2||s>4) s=3;						//兜底:选择页已经保证是 2~4
 	Run_Laps=0; Run_Ticks=0; Run_State=1;
 	Motor_Switch(turn_on);
 
 	Run_Current=1;
 	Interface_Run("GO",1);
-	r=Nav_ParkAt(DEST_START,1);
+	r=Nav_ParkAt(DEST_START,1);				//先循迹到 1号方框几何中心
 
-	if (r==Nav_OK){
-		Delay_ms(500);
-		Car_TurnTo(180.0f);						//掉头,面向中心交点
-
-		Run_Current=s;
-		Interface_Run("OFFLINE",s);
-
-		Car_MoveForward(NAV_CENTER_CM);	//直线开到中心交点
-
-		turn=Spoke_Turn(1,s)*NAV_LEFT_SIGN;		//在交点上转到停车点那条辐条
-		if (turn>NAV_TURN_SKIP||turn<-NAV_TURN_SKIP){
-			Car_TurnTo(turn);
-		}
-
-		Car_MoveForward(NAV_CENTER_CM);	//直线开到停车点方框几何中心
+	if (r!=Nav_OK){
+		Motor_SetSpeed(0,0);
+		Run_State=0;
+		Interface_Finish(Nav_Msg[r<4?r:0]);
+		return;
 	}
+
+	Delay_ms(500);							//在 1号稳一下再定位
+
+	/* 此刻车停在 1号方框几何中心,车头朝 1号辐条向外的方向
+	   (Car_TraceLine 是沿辐条从交点往外走进方框的,所以航向 = Spoke_Angle[1] = 90°)。
+	   ① 先原地转 180° 掉头面向场地;
+	   ② 再转到那条弦的航向。Car_TurnTo 的量是"从当前朝向算起的相对角",
+	      掉头后朝向 = 90-180 = -90°,所以要转的量
+	        = 弦航向 - (-90°) = 弦航向 + 90°
+	        = (Spoke_Angle[1]+Spoke_Angle[s]) * 0.5f
+	      代进去就是 2号 +67.5° / 3号 +45° / 4号 +22.5°,全是右转。 */
+	Run_Current=s;
+	Interface_Run("OFFLINE",s);
+
+	Car_TurnTo(180.0f);						//① 掉头,面向场地
+	turn=Nav_DirectHeading(1,s)+90.0f;		//② 再转到弦的航向
+	Car_TurnTo(turn);
+
+	dist=Nav_DirectDist(1,s);				//弦长:2号 72.6 / 3号 134.1 / 4号 175.3 cm
+	Car_MoveForward(dist);					//一条直线开过去,全程不碰传感器
 
 	Motor_SetSpeed(0,0);
 	Run_State=0;

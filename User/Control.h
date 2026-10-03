@@ -30,11 +30,11 @@ void Mode_GoDestination(void);	//基本(2):0号 -> 随机目的地 -> 0号
 void Mode_A2B(void);			//发挥(1):0号 -> A -> 停2s -> B -> 停2s -> 0号
 void Mode_OffLine(void);		//发挥(2):0号 -> 巡线到1号 -> 离线直行到停车点
 
-/* ---------------- 目标选择(Page5 / Page6 上按 Key2 循环) ---------------- */
-extern uint8_t Dest_Main;		//当前目的地 1~5
-extern uint8_t Dest_Alt;		//第二目的地 / 离线停车点 1~5
-void Dest_Main_Next(void);
-void Dest_Alt_Next(void);
+/* ---------------- 目标选择 ----------------
+   不再是独立的两页,而是在按下 K2 进入某个模式之后,由
+   Interface_SelectDest() 现场选,选完才开始跑。 */
+extern uint8_t Dest_Main;		//目的地 / A->B 里的 A,范围 1~5
+extern uint8_t Dest_Alt;		//A->B 里的 B / 离线停车点
 
 /* ---------------- 运行状态(给 OLED 和上位判断用) ---------------- */
 extern volatile uint8_t  Run_State;		//0=空闲 1=模式运行中

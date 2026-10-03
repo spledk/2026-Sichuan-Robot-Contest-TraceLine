@@ -19,43 +19,53 @@ void Devices_Init(void){
 
 void Interact(void){
 	enum Interface_Page Page=Page0_MainInterface;
+
 	Motor_Switch(turn_on);				//TB6612 STBY 拉高,否则电机永远不转
+	Motor_SetSpeed(0,0);				//顺手清一次,保证上电时两轮是停住的
 	Interface(Page);
+
 	while (1){
-		if (Key1_GetStatus()==Press){
+		if (Key1_GetStatus()==Press){	//K1:顺序翻页,翻过最后一页回主页
 			Page++;
-			if (Page==Page7_Back2MainInterface) Page=Page0_MainInterface;
+			if (Page>Page5_Back2MainInterface) Page=Page0_MainInterface;
 			Interface(Page);
 		}
-		if (Key2_GetStatus()==Press){
+		if (Key2_GetStatus()==Press){	//K2:进这一页对应的流程
 			switch (Page){
 				case Page0_MainInterface:
 					break;
-				case Page1_BackForth:
+
+				case Page1_BackForth:		//0号 <-> 3号,不用选目的地
 					Mode_BackForth();
 					Interface(Page);
 					break;
-				case Page2_GoDestination:
+
+				case Page2_GoDestination:	//先选 1 个目的地(1~5),再跑
+					Dest_Main=Interface_SelectDest("2.GO & RETURN","Dest",
+					                               Dest_Main,1,DEST_MAX,0xFF);
 					Mode_GoDestination();
 					Interface(Page);
 					break;
-				case Page3_A2B:
+
+				case Page3_A2B:				//连选 2 个:A(1~5),B(1~5 且 !=A)
+					Dest_Main=Interface_SelectDest("3.A TO B","A",
+					                               Dest_Main,1,DEST_MAX,0xFF);
+					Dest_Alt =Interface_SelectDest("3.A TO B","B",
+					                               Dest_Alt, 1,DEST_MAX,Dest_Main);
 					Mode_A2B();
 					Interface(Page);
 					break;
-				case Page4_OffLine:
+
+				case Page4_OffLine:			//停车点题目规定不能是 1、5 号,只在 2~4 循环
+					Dest_Alt=Interface_SelectDest("4.OFF LINE","Stop",
+					                              Dest_Alt,2,4,0xFF);
 					Mode_OffLine();
 					Interface(Page);
 					break;
-				case Page5_ShowDestination:
-					Dest_Main_Next();
+
+				case Page5_Back2MainInterface:
+					Page=Page0_MainInterface;
 					Interface(Page);
-					break;
-				case Page6_Config:
-					Dest_Alt_Next();
-					Interface(Page);
-					break;
-				case Page7_Back2MainInterface:
 					break;
 			}
 		}
@@ -365,35 +375,7 @@ volatile uint8_t  Run_Current=0;
 volatile uint16_t Run_Laps=0;
 volatile uint16_t Run_Ticks=0;
 
-void Dest_Main_Next(void){
-	Dest_Main++;
-	if (Dest_Main>DEST_MAX) Dest_Main=1;
-}
-void Dest_Alt_Next(void){
-	Dest_Alt++;
-	if (Dest_Alt>DEST_MAX) Dest_Alt=1;
-}
-
-/* ---------------- OLED 小工具(Line 1~4,Column 1~16) ---------------- */
-static void Nav_ShowRun(char *Tag,uint8_t Dest){
-	OLED_Clear();
-	OLED_ShowString(1,1,"RUN ");
-	OLED_ShowString(1,5,Tag);
-	OLED_ShowString(2,1,"Dest: ");
-	OLED_ShowNum(2,7,Dest,1);
-	OLED_ShowString(3,1,"Laps: ");
-	OLED_ShowNum(3,7,Run_Laps,3);
-	OLED_ShowString(4,1,"LIFT: STOP");
-}
-
-static void Nav_ShowResult(uint8_t r){
-	OLED_Clear();
-	OLED_ShowString(1,1,"FINISHED");
-	OLED_ShowString(2,1,Nav_Msg[r<4?r:0]);
-	OLED_ShowString(3,1,"Laps: ");
-	OLED_ShowNum(3,7,Run_Laps,3);
-	OLED_ShowString(4,1,"LIFT: STOP");
-}
+/* ---------------- OLED 界面全部在 Interface.c,这里只留结果字符串 ---------------- */
 
 /* ---------------- 爬行:低速直行,直到传感器重新看到 1~3 路压线 ----------------
    两种情况都用它:
@@ -498,7 +480,7 @@ void Mode_BackForth(void){
 
 	while (1){
 		Run_Current=3;
-		Nav_ShowRun("GO",3);
+		Interface_Run("GO",3);
 
 		r=Nav_ParkAt(DEST_START,3);				//0号 -> 3号
 		if (r!=Nav_OK) break;
@@ -507,13 +489,13 @@ void Mode_BackForth(void){
 		/* 方案2:不转向,直接倒车回 0号方框中心。
 		   车头一直朝 3号,所以下一趟直接再往前开一次就行,不用再掉头。 */
 		Run_Current=DEST_START;
-		Nav_ShowRun("REV",DEST_START);
+		Interface_Run("REV",DEST_START);
 		Car_MoveForward(-2.0f*NAV_CENTER_CM);
 #else
 		/* 方案1:原地掉头,再循迹走回 0号 */
 		Car_TurnTo(180.0f);
 		Run_Current=DEST_START;
-		Nav_ShowRun("BACK",DEST_START);
+		Interface_Run("BACK",DEST_START);
 		r=Nav_ParkAt(3,DEST_START);				//3号 -> 0号
 		if (r!=Nav_OK) break;
 
@@ -526,7 +508,7 @@ void Mode_BackForth(void){
 
 	Motor_SetSpeed(0,0);
 	Run_State=0;
-	Nav_ShowResult(r);
+	Interface_Finish(Nav_Msg[r<4?r:0]);
 }
 
 /* 基本(2) 从停车启动区出发,巡线到 Dest_Main,再巡线回来 */
@@ -538,20 +520,20 @@ void Mode_GoDestination(void){
 	Motor_Switch(turn_on);
 
 	Run_Current=d;
-	Nav_ShowRun("GO",d);
+	Interface_Run("GO",d);
 	r=Nav_ParkAt(DEST_START,d);
 
 	if (r==Nav_OK){
 		Delay_ms(500);							//停一下
 		Car_TurnTo(180.0f);						//掉头往回开
 		Run_Current=DEST_START;
-		Nav_ShowRun("BACK",DEST_START);
+		Interface_Run("BACK",DEST_START);
 		r=Nav_ParkAt(d,DEST_START);
 	}
 
 	Motor_SetSpeed(0,0);
 	Run_State=0;
-	Nav_ShowResult(r);
+	Interface_Finish(Nav_Msg[r<4?r:0]);
 }
 
 /* 发挥(1) 0号 -> A(Dest_Main) -> 停2s -> B(Dest_Alt) -> 停2s -> 0号
@@ -567,7 +549,7 @@ void Mode_A2B(void){
 	Motor_Switch(turn_on);
 
 	Run_Current=a;
-	Nav_ShowRun("GO A",a);
+	Interface_Run("GO A",a);
 	r=Nav_ParkAt(DEST_START,a);
 
 	if (r==Nav_OK){
@@ -575,7 +557,7 @@ void Mode_A2B(void){
 		Car_TurnTo(180.0f);
 
 		Run_Current=b;
-		Nav_ShowRun("GO B",b);
+		Interface_Run("GO B",b);
 		r=Nav_ParkAt(a,b);
 
 		if (r==Nav_OK){
@@ -583,19 +565,19 @@ void Mode_A2B(void){
 			Car_TurnTo(180.0f);
 
 			Run_Current=DEST_START;
-			Nav_ShowRun("BACK",DEST_START);
+			Interface_Run("BACK",DEST_START);
 			r=Nav_ParkAt(b,DEST_START);
 		}
 	}
 
 	Motor_SetSpeed(0,0);
 	Run_State=0;
-	Nav_ShowResult(r);
+	Interface_Finish(Nav_Msg[r<4?r:0]);
 }
 
 /* 发挥(2) 巡线到 1号,之后不经巡线直线开到停车点 Dest_Alt
-   题目规定停车点不能是 1、5 号,所以 s 夹到 2~4。
-   离线段走"方框中心 -> 中心交点 -> 停车点方框中心"两段各 95cm,
+   题目规定停车点不能是 1、5 号,所以选择页只在 2~4 里循环。
+   离线段走"方框中心 -> 中心交点 -> 停车点方框中心"两段各 NAV_CENTER_CM,
    全程只用陀螺航向 + 编码器里程,不碰传感器。 */
 void Mode_OffLine(void){
 	uint8_t r,s=Dest_Alt;
@@ -606,7 +588,7 @@ void Mode_OffLine(void){
 	Motor_Switch(turn_on);
 
 	Run_Current=1;
-	Nav_ShowRun("GO",1);
+	Interface_Run("GO",1);
 	r=Nav_ParkAt(DEST_START,1);
 
 	if (r==Nav_OK){
@@ -614,7 +596,7 @@ void Mode_OffLine(void){
 		Car_TurnTo(180.0f);						//掉头,面向中心交点
 
 		Run_Current=s;
-		Nav_ShowRun("OFFLINE",s);
+		Interface_Run("OFFLINE",s);
 
 		Car_MoveForward(NAV_CENTER_CM);	//直线开到中心交点
 
@@ -628,5 +610,5 @@ void Mode_OffLine(void){
 
 	Motor_SetSpeed(0,0);
 	Run_State=0;
-	Nav_ShowResult(r);
+	Interface_Finish(Nav_Msg[r<4?r:0]);
 }

@@ -25,28 +25,166 @@ void Devices_Init(void){
 	MPU_6050_Init();	
 }
 
-void Interact(void){
-	enum Interface_Page Page=Page0_MainInterface;
+//**交互界面**//
+/*	*
+整个界面集中在这里,main 只调用 Interact() 和 Run_Show()。
+页表在 Interface.h,按键:K1 = 顺页翻页,K2 = 执行当前页。
+Key_GetStatus() 本身就是"按下并等松手"的,所以不会连触发。
 
-	Motor_Switch(turn_on);				
-	Motor_SetSpeed(0,0);				
-	Interface(Page);
+Interact() 只有两种返回:
+	1 = 用户在"开始比赛"页按了 K2,main 去跑比赛
+	0 = 用户在配置页跑完一个功能,main 直接 continue 再进来
+**/
+#define ACT_CALIB_CM			100.0f	//1m 标定用的实际线长(cm)
+#define ACT_CALIB_APPROACH_CM	40.0f	//1m 标定:起步直行,最多走这么远去找线
+
+static enum Interface_Page CurrentPage=Page_Run;
+
+/* 定长写一行:补满 16 个字符,换页时不会残留上一页的字 */
+static void Show_Line(uint8_t Line,const char *s){
+	char buf[17];
+	uint8_t i=0,j;
+
+	while (i<16 && s[i]!='\0'){ buf[i]=s[i]; i++; }
+	for (j=i;j<16;j++) buf[j]=' ';
+	buf[16]='\0';
+	OLED_ShowString(Line,1,buf);
+}
+
+static void Page_Show(void){
+	switch (CurrentPage){
+		case Page_Run:
+			Show_Line(1,"2026 TRACE");
+			Show_Line(2,"K2: START RUN");
+			Show_Line(3,"K1: NEXT PAGE");
+			Show_Line(4,"");
+			break;
+		case Page_Gyro:
+			Show_Line(1,"CONFIG 1/2");
+			Show_Line(2,"GYRO CALIB");
+			Show_Line(3,"CAR STILL, HANDS OFF");
+			Show_Line(4,"K2:RUN  K1:NEXT");
+			break;
+		case Page_Meter:
+			Show_Line(1,"CONFIG 2/2");
+			Show_Line(2,"1M CALIB");
+			Show_Line(3,"CAR BEFORE 1M LINE");
+			Show_Line(4,"K2:RUN  K1:NEXT");
+			break;
+		default:
+			break;
+	}
+}
+
+/* 第4行上的秒倒计时,数完显示 GO! */
+void Countdown_Show(uint8_t sec){
+	Show_Line(4,"GO IN:");
+	OLED_ShowNum(4,7,sec,1);
+	while (sec>0){
+		Delay_ms(1000);
+		sec--;
+		if (sec>0) OLED_ShowNum(4,7,sec,1);
+	}
+	Show_Line(4,"GO!");
+}
+
+void Wait_Key2(void){
+	while (Key2_GetStatus()!=Press);
+}
+
+void Gyro_Calib(void){
+	Show_Line(1,"CONFIG 1/2");
+	Show_Line(2,"GYRO CALIB");
+	Show_Line(3,"KEEP STILL...");
+	Countdown_Show(3);
+	Show_Line(3,"CALIBRATING...");
+	MPU_6050_GyroErrorCorrect();
+	Show_Line(1,"GYRO CALIB DONE");
+	Show_Line(3,"K2: OK");
+	Wait_Key2();
+}
+
+static float Act_CalibPulse=0.0f;		//1m 标定测到的脉冲数,只给显示用
+
+void Meter_Calib(void){
+	uint8_t r=0;
+
+	Act_CalibPulse=0.0f;
+	Show_Line(1,"CONFIG 2/2");
+	Show_Line(2,"1M CALIB");
+	Show_Line(3,"KEEP STILL...");
+	Countdown_Show(3);
+
+	Show_Line(1,"1M CALIB");
+	Show_Line(3,"APPROACH LINE...");		//直行到压上线就返回
+	Car_MoveForward(ACT_CALIB_APPROACH_CM);
+
+	Show_Line(3,"MEASURING...");			//循迹,一脱线就用走过的里程反推
+	r=Car_Act(Act_Calib,0.0f);
+
+	if (r!=Act_OK_Calib){					//没走到线的尽头(中途脱线超时/堵转)
+		Show_Line(1,"1M CALIB FAIL");
+		Show_Line(2,"ERR CODE:");
+		OLED_ShowNum(2,11,r,1);
+		Show_Line(3,"CHECK THE 1M LINE");
+		Show_Line(4,"K2: OK");
+		Wait_Key2();
+		return;
+	}
+
+	Show_Line(1,"1M CALIB DONE");
+	Show_Line(2,"PULSE/100CM:");
+	OLED_ShowNum(2,13,(uint32_t)Act_CalibPulse,4);
+	Show_Line(3,"CPC x10:");
+	OLED_ShowNum(3,9,(uint32_t)(CountPerCM*10.0f),4);
+	Show_Line(4,"K2: OK");
+	Wait_Key2();
+}
+
+uint8_t Interact(void){
+	Motor_Switch(turn_on);
+	Motor_SetSpeed(0,0);
+	CurrentPage=Page_Run;
+	Page_Show();
 
 	while (1){
-		if (Key1_GetStatus()==Press){	//K1:顺序翻页,翻过最后一页回主页
-			Page++;
-			if (Page>Pageend) Page=Page0_MainInterface;
-			Interface(Page);
+		if (Key1_GetStatus()==Press){		//K1:顺页翻页,翻过最后一页回首页
+			CurrentPage++;
+			if (CurrentPage>=Page_Count) CurrentPage=Page_Run;
+			Page_Show();
 		}
-		if (Key2_GetStatus()==Press){	//K2:进这一页对应的流程
-			switch (Page){
-				case Page0_MainInterface:
+		if (Key2_GetStatus()==Press){		//K2:执行当前页
+			switch (CurrentPage){
+				case Page_Run:
+					return 1;				//去跑比赛
+				case Page_Gyro:
+					Gyro_Calib();
+					Page_Show();
+					return 0;
+				case Page_Meter:
+					Meter_Calib();
+					Page_Show();
+					return 0;
+				default:
 					break;
-				case Pageend:
-					return;				//选好了,回 main 去跑比赛状态机
 			}
 		}
 	}
+}
+
+/* 状态机显示:stopped=1 时第一行变 STOP,第二行右侧加停车原因码 */
+void Run_Show(uint8_t stage,uint8_t junc,uint8_t res,uint8_t stopped){
+	Show_Line(1,stopped?"2026 STOP":"2026 TRACE");
+	Show_Line(2,"STAGE:");
+	OLED_ShowNum(2,7,stage,1);
+	if (stopped){
+		OLED_ShowString(2,9,"R=");
+		OLED_ShowNum(2,11,res,1);
+	}
+	Show_Line(3,"JUNC :");
+	OLED_ShowNum(3,7,junc,2);
+	Show_Line(4,"VALID:");
+	OLED_ShowNum(4,7,(uint32_t)Act_StraightValid,3);
 }
 
 //**集成动作函数**//
@@ -60,8 +198,9 @@ void Interact(void){
     Act_Distance  定距循迹:循迹过程中累计里程,到 distance cm 返回(不用陀螺仪)
     Act_Straight  直线检测:循迹 + 陀螺仪。相对本段起点角度偏差不超过
                   ACT_STRAIGHT_ANGLE 的行程才算"有效行程",偏差超限就清零、以当前
-                  角度为新起点重新累计;有效行程攒够 distance 之后,再遇到三路全亮
-                  就返回(本工程不需要直线检测四路,默认只认三路)。
+                  角度为新起点重新累计;有效行程攒够 distance 之后,再遇到三路/四路
+                  全亮就返回。圆环和直角弯的偏航都超容差,有效行程会被清零重来,
+                  所以能筛掉中间那些不长不直的路段,只认最后那段超长直线。
   distance 只在 Act_Distance / Act_Straight 里有用,其它模式传 0。
 
 四路/三路全亮的几何依据(线宽2.5cm,最外侧L2~R2间距6.3cm):
@@ -89,6 +228,9 @@ void Interact(void){
 
 #define MyABS(x)			((x)<0 ? -(x) : (x))
 
+float Act_StraightValid=0.0f;			//Act_Straight 当前累计的直线有效行程(cm)
+#define ACT_SHOW_TICK		20		//每20拍(200ms)把有效行程刷到OLED第4行,现场标定用
+
 uint8_t Car_Act(enum Act_Mode mode,float distance){
 	ErrorInformation Info;
 	struct MPU_6050_TurnNeedData Data;
@@ -97,7 +239,7 @@ uint8_t Car_Act(enum Act_Mode mode,float distance){
 	float mileage=0.0f,mileage_last=0.0f,dm=0.0f;
 	int8_t dir=1;						//1=右 -1=左
 	uint8_t result=Act_OK_Dist;			//占位,循环里必被覆盖
-	uint16_t blind=0,stall=0,mpu_lost=0,all3=0;
+	uint16_t blind=0,stall=0,mpu_lost=0,all3=0,show_tick=0;
 	int16_t left=0,right=0;
 
 	Motor_SetSpeed(0,0);
@@ -151,6 +293,12 @@ uint8_t Car_Act(enum Act_Mode mode,float distance){
 			else if (error<-0.1f) dir=-1;
 		}else if (Info.OnLineNum==0){				//脱线打死
 			all3=0;
+			if (mode==Act_Calib){					//1m 标定:线到头了,就地反推 CountPerCM
+				Act_CalibPulse=mileage*CountPerCM;	//走过的原始脉冲数(先用旧比例算回来)
+				if (Act_CalibPulse>1.0f) CountPerCM=Act_CalibPulse/ACT_CALIB_CM;
+				result=Act_OK_Calib;
+				break;
+			}
 			if (++blind>ACT_BLIND_MAX){ result=Act_ErrLost; break; }
 			error=dir*ACT_BLIND_ERROR;
 		}else{										//正常压线
@@ -174,7 +322,15 @@ uint8_t Car_Act(enum Act_Mode mode,float distance){
 			/* 本工程不需要直线检测四路,默认只认三路:
 			   直线有效行程攒够 distance 之后,再遇到三路全亮就返回 —— 出口就是 F 那个直角弯。
 			   正着循迹时几何上给不了三路(要车与线夹角<=45.6度),所以这个出口很干净。 */
-			if (valid>=distance&&Info.OnLineNum==3){ result=Act_OK_Straight; break; }
+			Act_StraightValid=valid;				//暴露给 OLED,现场标定 NAV_STRAIGHT_CM 用
+			if (++show_tick>=ACT_SHOW_TICK){		//每200ms刷一次第4行
+				show_tick=0;
+				OLED_ShowString(4,1,"VALID:");
+				OLED_ShowNum(4,7,(uint32_t)valid,3);
+			}
+			/* 攒够直线之后的第一个特殊点就是出口。三路(直角弯)和四路(十字路/路口)
+			   都收,省得纠结尽头到底是哪一种。 */
+			if (valid>=distance&&Info.OnLineNum>=3){ result=Act_OK_Straight; break; }
 		}
 
 		/* ---- 循迹输出 ---- */
@@ -226,6 +382,10 @@ void Car_MoveForward(float distance_cm){
 	while (1){
 		if (Timer_GetMicros()<MOVE_PERIOD_US) continue;	
 		Timer_Switch(turn_on);							
+
+		/* 1m 标定用:任意一路压上线就立刻停,后面交给循迹接管。
+		   比赛流程里不用这个函数,所以不影响原先的定距直行语义。 */
+		if (Sensor_GetErrorInformation().OnLineNum>0) break;
 
 		Data=MPU_6050_GetTurnNeedData();
 		if (Data.IsNew==New){

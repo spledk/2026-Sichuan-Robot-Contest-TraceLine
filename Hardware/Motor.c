@@ -32,8 +32,8 @@
 int16_t PWM_MAX=ARR-1;
 
 static float DWheel=7.0f;		//轮子直径 cm
-//每厘米多少个编码器计数(左右轮取平均)。标定:手推正好100cm,读数/100
-static float CountPerCM=76.5f;
+//每厘米多少个编码器计数(左右轮取平均)。标定:Config 页的"1m标定"自动改写,也可以手推100cm读数/100
+float CountPerCM=76.5f;
 
 
 void Motor_Control_Init(void){									

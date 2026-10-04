@@ -21,6 +21,6 @@ int main(){
 	MPU_6050_GyroErrorCorrect();
 	OLED_Clear();
 
-	Interact();                                   // 菜单 + 四种比赛模式,不会返回
+	Interact();                                   
 	while (1);
 }

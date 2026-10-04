@@ -3,12 +3,25 @@
 
 #include <stdint.h>
 
-//Car_TraceLine 的返回值,给上位函数判断用
-enum Trace_Result{
-	Trace_LostLine=0,	//脱线:盲走超时也没找回线
-	Trace_OK=1,			//预留:正常终止条件(到达终点之类)
-	Trace_AllOn=2		//四路全亮:路口/异常
+//Car_Act 的工作模式
+enum Act_Mode{
+	Act_All4=0,			//循迹,遇到四路全亮返回
+	Act_All3,			//循迹,遇到三路全亮返回
+	Act_Distance,		//定距循迹,里程到 distance 返回(不用陀螺仪)
+	Act_Straight		//直线判断(循迹+陀螺仪),有效行程到 distance 返回
 };
+
+//Car_Act 的返回值:先列成功原因,再列异常;用 ACT_IS_OK 判断
+enum Act_Result{
+	Act_OK_All4=0,		//四路全亮
+	Act_OK_All3,		//三路全亮
+	Act_OK_Dist,		//定距走完
+	Act_OK_Straight,	//直线判断走完
+	Act_ErrLost,		//脱线
+	Act_ErrStall,		//卡死
+	Act_ErrMPU			//陀螺仪失灵
+};
+#define ACT_IS_OK(r)	((r)<Act_ErrLost)
 
 /* ---------------- 场地拓扑 ----------------
    6 个 A4 方框,每个由一条 80cm 引导线接到中心交点(十字路口):
@@ -20,9 +33,12 @@ enum Trace_Result{
 
 void Devices_Init(void);
 void Interact(void);
-void Car_TurnTo(float target_degree);
-uint8_t Car_TraceLine(void);
+uint8_t Car_Act(enum Act_Mode mode,float distance);	//集成动作,详见 Control.c 顶部注释
 void Car_MoveForward(float distance_cm);	//正=前进 负=倒车,单位 cm
+
+/* ---------------- 比赛流程 ----------------
+   阶段1计数 -> 连续圆环 -> 出环后找直角弯 -> 停车 */
+void Competition_Run(void);
 
 /* ---------------- 模式函数(Interact 里按 Key2 调用) ---------------- */
 void Mode_BackForth(void);		//基本(1):0号 <-> 3号 折返
